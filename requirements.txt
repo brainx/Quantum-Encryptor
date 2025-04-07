@@ -1,0 +1,4 @@
+liboqs>=0.7.2
+pyoqs>=0.4.0   # Python wrapper for liboqs
+cryptography>=39.0.0
+streamlit>=1.22.0 
