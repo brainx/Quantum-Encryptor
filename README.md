@@ -13,6 +13,20 @@ A post-quantum cryptography tool for file encryption using quantum-resistant alg
 - **User-Friendly Interface**: Simple web-based UI built with Streamlit
 - **PEM Key Format**: Keys stored in PEM-like format with quantum algorithm extensions
 
+## Screenshots
+
+The repository includes representative screenshots of the main workflows. The backend readiness warning shown here is expected when native `liboqs` is not installed in the local environment.
+
+| Generate Keys | Encrypt File |
+| --- | --- |
+| ![Generate keys workflow with backend readiness warning](docs/screenshots/generate-keys-backend-warning.jpg) | ![Encrypt file workflow](docs/screenshots/encrypt-file-workflow.jpg) |
+
+| Decrypt File | Key Utilities |
+| --- | --- |
+| ![Decrypt file workflow](docs/screenshots/decrypt-file-workflow.jpg) | ![Key utilities workflow](docs/screenshots/key-utilities-workflow.jpg) |
+
+See [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md) for the dedicated screenshot page.
+
 ## Requirements
 
 - Python 3.10 through 3.13
@@ -70,10 +84,6 @@ A post-quantum cryptography tool for file encryption using quantum-resistant alg
    - Encrypt files using a recipient's public key
    - Decrypt files using your private key
    - Access key utilities
-
-## Screenshots
-
-Representative UI screenshots are available in [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md).
 
 ### Key Generation
 
