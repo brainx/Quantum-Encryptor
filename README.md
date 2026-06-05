@@ -4,6 +4,7 @@ A post-quantum cryptography tool for file encryption using quantum-resistant alg
 
 ![Quantum Encryption](https://img.shields.io/badge/Encryption-Post--Quantum-blue)
 ![Python Version](https://img.shields.io/badge/Python-3.10--3.13-green)
+![CI](https://github.com/brainx/Quantum-Encryptor/actions/workflows/ci.yml/badge.svg)
 
 <p align="center">
   <a href="docs/SCREENSHOTS.md">
@@ -138,6 +139,7 @@ See [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md) for the dedicated screenshot page
 - Private key password protection uses PBKDF2-HMAC-SHA256 and AES-256-GCM
 - The web UI enforces a 100 MiB per-file processing limit because files are handled in memory
 - Native `liboqs` is loaded lazily and missing backend support disables key generation/encryption instead of crashing the app
+- CI runs formatting, linting, type checks, unit tests, and a native `liboqs` integration test job
 - **Disclaimer**: This software has not undergone an independent security audit and should be reviewed before production use
 
 ## Project Structure

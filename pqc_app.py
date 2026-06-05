@@ -247,6 +247,7 @@ elif operation == "Encrypt File":
                 f"Selected file is {format_size(uploaded_file.size)}. "
                 f"The maximum supported size is {format_size(cfg.MAX_FILE_BYTES)}."
             )
+        pub_pem_content: str | None
         try:
             pub_pem_content = public_key_pem_file.getvalue().decode("utf-8")
         except Exception as e:
@@ -258,7 +259,7 @@ elif operation == "Encrypt File":
             # Load public key (password ignored by load_key_pem for public keys)
             pub_key_bytes, kem_alg_from_key, key_type = core.load_key_pem(pub_pem_content)
 
-            if pub_key_bytes and key_type == "public":
+            if pub_key_bytes and kem_alg_from_key is not None and key_type == "public":
                 st.success(f"Public Key loaded successfully (Algorithm: {kem_alg_from_key}).")
 
                 original_filename = Path(uploaded_file.name)
@@ -338,6 +339,7 @@ elif operation == "Decrypt File":
                 f"The maximum supported size is {format_size(cfg.MAX_FILE_BYTES)}."
             )
         # First, inspect the private key to see if it's encrypted
+        priv_pem_content: str | None
         try:
             priv_pem_content = private_key_pem_file.getvalue().decode("utf-8")
             priv_alg, priv_type, priv_encrypted = core.get_key_info_pem(priv_pem_content)

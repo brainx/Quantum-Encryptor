@@ -65,7 +65,13 @@ Native `liboqs` is required for the key generation and end-to-end file encryptio
 
 ## Continuous Integration
 
-The tests are automatically run as part of the CI/CD pipeline when changes are pushed to the repository.
+The GitHub Actions workflow in `.github/workflows/ci.yml` runs:
+
+- `black --check`
+- `flake8`
+- `mypy`
+- Unit tests without native `liboqs`
+- A native `liboqs` integration job so backend-dependent KEM round-trip tests run in CI
 
 ## Coverage Goals
 

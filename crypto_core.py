@@ -26,16 +26,22 @@ _oqs_load_error: Optional[str] = None
 
 # Setup Logger
 logger = logging.getLogger(__name__)
-# Configure root logger if not already configured by the app
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - [%(module)s] - %(message)s",
-    )
 
 
-class CryptoDependencyError(RuntimeError):
+class CryptoCoreError(RuntimeError):
+    """Base class for cryptographic workflow failures."""
+
+
+class CryptoDependencyError(CryptoCoreError):
     """Raised when a required cryptography backend is unavailable."""
+
+
+class UnsupportedAlgorithmError(ValueError):
+    """Raised when a KEM identifier is not supported by this application."""
+
+
+class FileFormatError(ValueError):
+    """Raised when an encrypted file header or payload format is invalid."""
 
 
 def _native_oqs_library_available() -> bool:
@@ -117,7 +123,7 @@ def resolve_kem_algorithm(kem_alg: Optional[str] = None) -> str:
     """Resolve a configured KEM name to one enabled by the installed OQS backend."""
     requested = kem_alg or cfg.KEM_ALG
     if not is_allowed_kem_algorithm(requested):
-        raise ValueError(f"Unsupported KEM algorithm: {requested!r}")
+        raise UnsupportedAlgorithmError(f"Unsupported KEM algorithm: {requested!r}")
 
     enabled = set(_enabled_kem_mechanisms())
     for candidate in _kem_aliases(requested):
@@ -155,7 +161,6 @@ def generate_oqs_keys(
 ) -> Tuple[Optional[bytes], Optional[bytes]]:
     """Generates raw PQC public/private key pair bytes using OQS."""
     logger.info(f"Attempting to generate raw keys for KEM: {kem_alg}")
-    public_key, secret_key = None, None  # Ensure cleanup in finally block
     try:
         resolved_kem_alg = resolve_kem_algorithm(kem_alg)
         oqs_module = _require_oqs()
@@ -194,11 +199,6 @@ def generate_oqs_keys(
             return None, None
         logger.exception(f"Unexpected error generating OQS keys for {kem_alg}: {e}")
         return None, None
-    finally:
-        # Best effort to clear intermediate key copies if they exist
-        if "kem" in locals() and hasattr(kem, "__exit__"):
-            pass  # Context manager handles cleanup
-        # Note: public_key, secret_key are returned or are None
 
 
 # --- Key Derivation Functions ---
@@ -214,7 +214,7 @@ def derive_symmetric_key_hkdf(shared_secret: bytes) -> bytes:
         backend=default_backend(),
     )
     derived_key = hkdf.derive(shared_secret)
-    # Explicitly delete the input shared secret copy if possible
+    # Drop this local reference only; immutable bytes are not securely zeroized in Python.
     del shared_secret
     return derived_key
 
@@ -230,11 +230,12 @@ def derive_key_from_password(password: str, salt: bytes) -> bytes:
         iterations=cfg.PBKDF2_ITERATIONS,
         backend=default_backend(),
     )
-    derived_key = kdf.derive(password.encode("utf-8"))
-    # Explicitly delete password copy if possible (difficult in Python strings)
-    password = ""  # Overwrite local variable copy
-    del password
-    return derived_key
+    password_bytes = password.encode("utf-8")
+    try:
+        return kdf.derive(password_bytes)
+    finally:
+        # Drop this local reference only; immutable bytes are not securely zeroized in Python.
+        del password_bytes
 
 
 # --- Private Key Encryption/Decryption ---
@@ -357,9 +358,9 @@ def save_key_pem(key_bytes: bytes, kem_alg: str, key_type: str, password: Option
     # Add footer
     pem_data_lines.append(cfg.PEM_PUBLIC_FOOTER if key_type == "public" else cfg.PEM_PRIVATE_FOOTER)
 
-    # Clean up intermediate sensitive data if private
+    # Drop local references to private-key material. Python cannot guarantee secure zeroization.
     if key_type == "private":
-        del key_bytes  # Delete the raw key bytes copy
+        del key_bytes
         if "encrypted_key" in locals():
             del encrypted_key
 
@@ -472,7 +473,7 @@ def load_key_pem(
             return None, None, None
         else:
             logger.info(f"Successfully loaded and decrypted private key for algorithm {kem_alg}.")
-            # Clean up intermediate encrypted bytes copy
+            # Drop local references to intermediate encrypted key material.
             del raw_or_encrypted_bytes
             del dek_parts
             return raw_key_bytes, kem_alg, key_type
@@ -538,8 +539,7 @@ def encrypt_file_pro(input_data: bytes, public_key_bytes: bytes, kem_alg: str = 
         return None
     if not input_data:
         logger.warning("Input data for encryption is empty.")
-        # Decide if empty files should be encrypted or raise error
-        # Let's allow encrypting empty files for now.
+        # Empty files are valid; the encrypted output still carries header metadata and an auth tag.
 
     shared_secret_sender = None
     aes_key = None
@@ -563,7 +563,8 @@ def encrypt_file_pro(input_data: bytes, public_key_bytes: bytes, kem_alg: str = 
 
             # 2. Derive AES Key securely
             aes_key = derive_symmetric_key_hkdf(shared_secret_sender)
-            shared_secret_sender = b""  # Zero out intermediate secret
+            # Drop the local shared-secret reference. Python bytes are not securely zeroized.
+            shared_secret_sender = None
 
             # 3. Generate Nonce
             nonce = os.urandom(cfg.AES_NONCE_BYTES)
@@ -612,15 +613,9 @@ def encrypt_file_pro(input_data: bytes, public_key_bytes: bytes, kem_alg: str = 
         logger.exception(f"Unexpected error during encryption: {e}")
         return None
     finally:
-        # Best effort cleanup
-        if aes_key:
-            aes_key = b""  # Zero out AES key
+        # Drop local references. Python bytes are not securely zeroized by reassignment/deletion.
         del aes_key
-        if shared_secret_sender:
-            shared_secret_sender = b""
         del shared_secret_sender
-        if "kem" in locals() and hasattr(kem, "__exit__"):
-            pass
         if "ciphertext_kem" in locals():
             del ciphertext_kem
         if "nonce" in locals():
@@ -653,7 +648,7 @@ def decrypt_file_pro(
         header_fixed_size = struct.calcsize(cfg.HEADER_BASE_FORMAT)
         header_fixed_part = input_buffer.read(header_fixed_size)
         if len(header_fixed_part) < header_fixed_size:
-            raise ValueError("File too short - truncated fixed header.")
+            raise FileFormatError("File too short - truncated fixed header.")
 
         magic, version = struct.unpack(cfg.HEADER_BASE_FORMAT, header_fixed_part)
 
@@ -674,43 +669,43 @@ def decrypt_file_pro(
         # Algo Len (H)
         kem_alg_len_bytes = input_buffer.read(struct.calcsize(">H"))
         if len(kem_alg_len_bytes) < struct.calcsize(">H"):
-            raise ValueError("Truncated header (KEM algo len).")
+            raise FileFormatError("Truncated header (KEM algo len).")
         kem_alg_len = struct.unpack(">H", kem_alg_len_bytes)[0]
         if kem_alg_len == 0 or kem_alg_len > cfg.MAX_KEM_ALG_NAME_BYTES:
-            raise ValueError("Implausible KEM Algo length in header.")
+            raise FileFormatError("Implausible KEM Algo length in header.")
 
         # Algo Name (kem_alg_len bytes)
         kem_alg_bytes = input_buffer.read(kem_alg_len)
         if len(kem_alg_bytes) < kem_alg_len:
-            raise ValueError("Truncated header (KEM algo name).")
+            raise FileFormatError("Truncated header (KEM algo name).")
         kem_alg_from_file = kem_alg_bytes.decode("utf-8")
         if not is_allowed_kem_algorithm(kem_alg_from_file):
-            raise ValueError("Unsupported KEM algorithm in encrypted file.")
+            raise UnsupportedAlgorithmError("Unsupported KEM algorithm in encrypted file.")
         logger.info(f"KEM algorithm from file: {kem_alg_from_file}")
 
         # KEM CT Len (I)
         kem_ct_len_bytes = input_buffer.read(struct.calcsize(">I"))
         if len(kem_ct_len_bytes) < struct.calcsize(">I"):
-            raise ValueError("Truncated header (KEM CT len).")
+            raise FileFormatError("Truncated header (KEM CT len).")
         kem_ct_len = struct.unpack(">I", kem_ct_len_bytes)[0]
         if kem_ct_len == 0 or kem_ct_len > cfg.MAX_KEM_CIPHERTEXT_BYTES:
-            raise ValueError("Implausible KEM ciphertext length.")
+            raise FileFormatError("Implausible KEM ciphertext length.")
 
         # KEM CT (kem_ct_len bytes)
         ciphertext_kem = input_buffer.read(kem_ct_len)
         if len(ciphertext_kem) < kem_ct_len:
-            raise ValueError("Truncated header (KEM CT).")
+            raise FileFormatError("Truncated header (KEM CT).")
 
         # Nonce (fixed size)
         nonce = input_buffer.read(cfg.AES_NONCE_BYTES)
         if len(nonce) < cfg.AES_NONCE_BYTES:
-            raise ValueError("Truncated header (Nonce).")
+            raise FileFormatError("Truncated header (Nonce).")
         header_aad = encrypted_blob[: input_buffer.tell()]
 
         # Rest is AES encrypted data
         encrypted_data_aes = input_buffer.read()
         if not encrypted_data_aes:
-            raise ValueError("Missing AES-GCM ciphertext and authentication tag.")
+            raise FileFormatError("Missing AES-GCM ciphertext and authentication tag.")
 
         logger.debug("File header parsed successfully.")
 
@@ -733,7 +728,8 @@ def decrypt_file_pro(
 
         # 4. Derive AES Key securely
         aes_key = derive_symmetric_key_hkdf(shared_secret_receiver)
-        shared_secret_receiver = b""  # Zero out intermediate secret
+        # Drop the local shared-secret reference. Python bytes are not securely zeroized.
+        shared_secret_receiver = None
 
         # 5. AES-GCM Decryption
         logger.debug("Performing AES-GCM decryption...")
@@ -760,7 +756,7 @@ def decrypt_file_pro(
     except struct.error as e_struct:
         logger.error(f"File format error during header unpacking: {e_struct}")
         return None, kem_alg_from_file  # Indicates corruption
-    except ValueError as e_val:  # Catch our explicit header validation errors
+    except (FileFormatError, UnsupportedAlgorithmError) as e_val:
         logger.error(f"Invalid or truncated file header: {e_val}")
         return None, kem_alg_from_file
     except UnicodeDecodeError:
@@ -776,15 +772,9 @@ def decrypt_file_pro(
         logger.exception(f"Unexpected error during decryption: {e}")
         return None, kem_alg_from_file
     finally:
-        # Best effort cleanup
-        if aes_key:
-            aes_key = b""
+        # Drop local references. Python bytes are not securely zeroized by reassignment/deletion.
         del aes_key
-        if shared_secret_receiver:
-            shared_secret_receiver = b""
         del shared_secret_receiver
-        if "kem" in locals() and hasattr(kem, "__exit__"):
-            pass
         if "ciphertext_kem" in locals():
             del ciphertext_kem
         if "nonce" in locals():

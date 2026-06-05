@@ -2,13 +2,41 @@
 Unit tests for crypto_core module functionality.
 """
 
+import base64
 import os
+import struct
 import pytest
 from typing import Tuple
 
 # Import module to test
 from crypto_config import cfg
 import crypto_core as core
+
+
+def _encrypted_blob_offsets(encrypted_data: bytes) -> dict[str, int]:
+    """Return useful offsets for the project encrypted-file format."""
+    fixed_header_size = struct.calcsize(cfg.HEADER_BASE_FORMAT)
+    alg_len_offset = fixed_header_size
+    alg_len = struct.unpack(">H", encrypted_data[alg_len_offset : alg_len_offset + 2])[0]
+    alg_offset = alg_len_offset + 2
+    kem_ct_len_offset = alg_offset + alg_len
+    kem_ct_len = struct.unpack(">I", encrypted_data[kem_ct_len_offset : kem_ct_len_offset + 4])[0]
+    kem_ct_offset = kem_ct_len_offset + 4
+    nonce_offset = kem_ct_offset + kem_ct_len
+    payload_offset = nonce_offset + cfg.AES_NONCE_BYTES
+    return {
+        "version": len(cfg.MAGIC_BYTES),
+        "kem_ct": kem_ct_offset,
+        "nonce": nonce_offset,
+        "payload": payload_offset,
+        "tag": len(encrypted_data) - 1,
+    }
+
+
+def _tamper(data: bytes, offset: int) -> bytes:
+    tampered = bytearray(data)
+    tampered[offset] ^= 0x01
+    return bytes(tampered)
 
 
 # Test fixtures
@@ -47,6 +75,20 @@ class TestKeyGeneration:
         public_key, private_key = core.generate_oqs_keys("InvalidAlgorithm")
         assert public_key is None
         assert private_key is None
+
+    def test_resolve_invalid_algorithm_raises_typed_error(self):
+        """Unsupported KEM names raise the typed core exception."""
+        with pytest.raises(core.UnsupportedAlgorithmError):
+            core.resolve_kem_algorithm("InvalidAlgorithm")
+
+    def test_require_oqs_reports_unavailable_native_backend(self, monkeypatch):
+        """Missing native liboqs is reported as a dependency error, not a process exit."""
+        monkeypatch.setattr(core, "oqs", None)
+        monkeypatch.setattr(core, "_oqs_load_error", None)
+        monkeypatch.setattr(core, "_native_oqs_library_available", lambda: False)
+
+        with pytest.raises(core.CryptoDependencyError):
+            core._require_oqs()
 
 
 class TestKeyDerivation:
@@ -185,6 +227,58 @@ class TestPEMKeyFormat:
 
         assert loaded_key_wrong is None  # Decryption failed
 
+    @pytest.mark.parametrize(
+        "pem_content",
+        [
+            "",
+            "not a pem file",
+            "\n".join(
+                [
+                    cfg.PEM_PUBLIC_HEADER,
+                    f"{cfg.PEM_ALGORITHM_HEADER}{cfg.KEM_ALG}",
+                    "not-valid-base64!",
+                    cfg.PEM_PUBLIC_FOOTER,
+                ]
+            ),
+            "\n".join(
+                [
+                    cfg.PEM_PUBLIC_HEADER,
+                    "AQID",
+                    cfg.PEM_PUBLIC_FOOTER,
+                ]
+            ),
+        ],
+    )
+    def test_load_key_pem_rejects_malformed_input(self, pem_content):
+        """Malformed PEM input fails closed."""
+        loaded_key, loaded_alg, loaded_type = core.load_key_pem(pem_content)
+
+        assert loaded_key is None
+        assert loaded_alg is None
+        assert loaded_type is None
+
+    def test_load_encrypted_private_key_rejects_bad_dek_info_lengths(self):
+        """Encrypted private key PEM metadata must use configured salt and nonce sizes."""
+        bad_salt = base64.b64encode(b"short").decode("ascii")
+        nonce = base64.b64encode(os.urandom(cfg.AES_NONCE_BYTES)).decode("ascii")
+        encrypted_key = base64.b64encode(b"encrypted-key").decode("ascii")
+        pem_content = "\n".join(
+            [
+                cfg.PEM_PRIVATE_HEADER,
+                cfg.PEM_PROC_TYPE_HEADER,
+                f"{cfg.PEM_DEK_INFO_HEADER}{bad_salt},{nonce}",
+                f"{cfg.PEM_ALGORITHM_HEADER}{cfg.KEM_ALG}",
+                encrypted_key,
+                cfg.PEM_PRIVATE_FOOTER,
+            ]
+        )
+
+        loaded_key, loaded_alg, loaded_type = core.load_key_pem(pem_content, password="password")
+
+        assert loaded_key is None
+        assert loaded_alg is None
+        assert loaded_type is None
+
 
 class TestFileEncryption:
     """Tests for file encryption/decryption."""
@@ -209,6 +303,18 @@ class TestFileEncryption:
         assert decrypted_data == test_data
         assert detected_alg == kem_alg
 
+    def test_encrypt_decrypt_empty_file(self, key_pair, kem_algorithm):
+        """Empty file content still round trips with authenticated metadata."""
+        public_key, private_key = key_pair
+
+        encrypted_data = core.encrypt_file_pro(b"", public_key, kem_algorithm)
+        assert encrypted_data is not None
+
+        decrypted_data, detected_alg = core.decrypt_file_pro(encrypted_data, private_key)
+
+        assert decrypted_data == b""
+        assert detected_alg == kem_algorithm
+
     def test_decrypt_with_wrong_key(self, key_pair, kem_algorithm):
         """Test decrypting with wrong private key."""
         public_key, _ = key_pair
@@ -229,6 +335,18 @@ class TestFileEncryption:
         # Should fail to decrypt
         assert decrypted_data is None
 
+    @pytest.mark.parametrize("field", ["version", "kem_ct", "nonce", "payload", "tag"])
+    def test_decrypt_rejects_tampered_encrypted_blob(self, key_pair, kem_algorithm, field):
+        """Tampering with authenticated header or ciphertext fields fails decryption."""
+        public_key, private_key = key_pair
+        encrypted_data = core.encrypt_file_pro(b"authenticated test data", public_key, kem_algorithm)
+        assert encrypted_data is not None
+        offsets = _encrypted_blob_offsets(encrypted_data)
+
+        decrypted_data, _detected_alg = core.decrypt_file_pro(_tamper(encrypted_data, offsets[field]), private_key)
+
+        assert decrypted_data is None
+
     def test_decrypt_rejects_unsupported_kem_header(self):
         """Unsupported KEM identifiers are rejected before backend use."""
         bad_alg = b"Unsupported-KEM"
@@ -247,3 +365,29 @@ class TestFileEncryption:
 
         assert decrypted_data is None
         assert detected_alg == bad_alg.decode("utf-8")
+
+    @pytest.mark.parametrize(
+        "encrypted_data",
+        [
+            b"",
+            cfg.MAGIC_BYTES[:3],
+            cfg.MAGIC_BYTES + cfg.FORMAT_VERSION.to_bytes(2, "big"),
+            cfg.MAGIC_BYTES + cfg.FORMAT_VERSION.to_bytes(2, "big") + b"\x00\x00",
+            cfg.MAGIC_BYTES + cfg.FORMAT_VERSION.to_bytes(2, "big") + b"\x00\xff",
+        ],
+    )
+    def test_decrypt_rejects_truncated_or_implausible_headers(self, encrypted_data):
+        """Malformed encrypted-file headers fail closed before backend use."""
+        decrypted_data, _detected_alg = core.decrypt_file_pro(encrypted_data, b"")
+
+        assert decrypted_data is None
+
+    def test_encrypt_rejects_oversized_input_before_backend_use(self, monkeypatch):
+        """Size limits are enforced before native backend access."""
+        monkeypatch.setattr(cfg, "MAX_FILE_BYTES", 3)
+        monkeypatch.setattr(core, "oqs", None)
+        monkeypatch.setattr(core, "_native_oqs_library_available", lambda: False)
+
+        encrypted_data = core.encrypt_file_pro(b"four", b"", cfg.KEM_ALG)
+
+        assert encrypted_data is None

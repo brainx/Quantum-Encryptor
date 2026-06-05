@@ -32,6 +32,15 @@ def resolve_kem_algorithm(kem_alg: Optional[str] = None) -> str:
     """
 ```
 
+The core defines typed exceptions for backend, unsupported-algorithm, and file-format failures. Public UI-facing helpers still return `None` on many failures for compatibility, while the UI converts those failures into safe user-facing messages.
+
+```python
+class CryptoCoreError(RuntimeError): ...
+class CryptoDependencyError(CryptoCoreError): ...
+class UnsupportedAlgorithmError(ValueError): ...
+class FileFormatError(ValueError): ...
+```
+
 ```python
 def is_kem_available(kem_alg: Optional[str] = None) -> bool:
     """

@@ -57,6 +57,8 @@ The application is designed to protect against the following threats:
 - The UI and core encryption path enforce a 100 MiB in-memory file limit.
 - Download filenames are reduced to local filenames before being passed to Streamlit.
 - Private-key password protection requires at least 16 characters in the UI.
+- The core module defines its own logger but leaves root logging configuration to application entry points.
+- CI runs static checks, tests without native `liboqs`, and a native `liboqs` integration test job.
 
 ## Security Best Practices
 
@@ -110,6 +112,7 @@ The application has the following security limitations:
 4. **In-Memory Processing**
    - Files are processed in memory, so very large-file streaming is not supported
    - Sensitive data may remain in Python-managed memory until garbage collection
+   - Local reference deletion in the implementation must not be treated as secure memory zeroization
 
 ## Reporting Security Issues
 
