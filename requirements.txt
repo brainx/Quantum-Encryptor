@@ -3,3 +3,5 @@ cryptography>=42.0.0
 streamlit>=1.32.0
 # Keep the locked runtime install portable on Ubuntu/Python 3.13.
 httptools>=0.6.4,<0.7
+# Streamlit pulls this on Linux; pin it explicitly so hashed locks stay portable.
+watchdog>=2.1.5,<7
